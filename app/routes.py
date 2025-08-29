@@ -1,5 +1,22 @@
 from flask_restx import Resource, fields, Namespace
 from app import api
+from flask import Flask, request, jsonify, abort, Blueprint, current_app
+from flask_sqlalchemy import SQLAlchemy
+from app.models import db, Telemetry
+from app.config import Config
+from flask_migrate import Migrate
+from flask_cors import CORS
+from datetime import datetime
+
+
+app = Flask(__name__)
+
+app.config.from_object(Config)
+CORS(app)
+db.init_app(app)
+migrate = Migrate(app, db)
+api.init_app(app)
+
 
 # Define a namespace
 ns = api.namespace('users', description='User operations')
@@ -16,6 +33,7 @@ users = [
     {'id': 1, 'name': 'John Doe', 'email': 'john@example.com'},
     {'id': 2, 'name': 'Jane Smith', 'email': 'jane@example.com'}
 ]
+
 
 @ns.route('/')
 class UserList(Resource):
