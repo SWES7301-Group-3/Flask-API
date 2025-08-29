@@ -1,93 +1,103 @@
+from flask import request
 from flask_restx import Resource, fields, Namespace
-from app import api
-from flask import Flask, request, jsonify, abort, Blueprint, current_app
-from flask_sqlalchemy import SQLAlchemy
-from app.models import db, Telemetry
-from app.config import Config
-from flask_migrate import Migrate
-from flask_cors import CORS
+from app.extensions import db, api
+from app.models import User, Telemetry
 from datetime import datetime
 
+# Namespaces
+user_ns = api.namespace('users', description='User operations')
+telemetry_ns = api.namespace('telemetry', description='Telemetry operations')
 
-app = Flask(__name__)
-
-app.config.from_object(Config)
-CORS(app)
-db.init_app(app)
-migrate = Migrate(app, db)
-api.init_app(app)
-
-
-# Define a namespace
-ns = api.namespace('users', description='User operations')
-
-# Define data model
+# User model schema for Swagger
 user_model = api.model('User', {
-    'id': fields.Integer(readonly=True, description='User ID'),
-    'name': fields.String(required=True, description='User name'),
-    'email': fields.String(required=True, description='User email')
+    'id': fields.Integer(readOnly=True, description='User ID'),
+    'firstname': fields.String(required=True, description="User's first name"),
+    'lastname': fields.String(required=True, description="User's last name"),
+    'username': fields.String(required=True, description="User's username"),
+    'email': fields.String(required=True, description="User's email")
 })
 
-# Sample data
-users = [
-    {'id': 1, 'name': 'John Doe', 'email': 'john@example.com'},
-    {'id': 2, 'name': 'Jane Smith', 'email': 'jane@example.com'}
-]
+# Telemetry model schema for Swagger
+telemetry_model = api.model('Telemetry', {
+    'id': fields.Integer(readOnly=True, description='Telemetry ID'),
+    'date': fields.String(required=True, description='Date in YYYY-MM-DD'),
+    'time': fields.String(required=True, description='Time in HH:MM:SS'),
+    'timezone': fields.String(required=True, description='Timezone'),
+    'coordinates': fields.String(required=True, description='Lat, Long'),
+    'temperatures': fields.Raw(description='Temperature JSON object'),
+    'humidity': fields.Float(description='Humidity %'),
+    'wind': fields.Raw(description='Wind JSON object'),
+    'precipitation': fields.Float(description='Precipitation mm'),
+    'haze': fields.Boolean(description='Haze condition'),
+    'notes': fields.String(description='Optional notes')
+})
 
-
-@ns.route('/')
+# ================= USER ROUTES =================
+@user_ns.route('/')
 class UserList(Resource):
-    @ns.doc('list_users')
-    @ns.marshal_list_with(user_model)
+    @user_ns.marshal_list_with(user_model)
     def get(self):
         """Get all users"""
-        return users
+        return User.query.all()
 
-    @ns.doc('create_user')
-    @ns.expect(user_model)
-    @ns.marshal_with(user_model, code=201)
+    @user_ns.expect(user_model)
+    @user_ns.marshal_with(user_model, code=201)
     def post(self):
-        """Create a new user"""
-        new_user = {
-            'id': len(users) + 1,
-            'name': api.payload['name'],
-            'email': api.payload['email']
-        }
-        users.append(new_user)
+        """Register a new user"""
+        data = request.json
+        new_user = User(
+            firstname=data.get('firstname'),
+            lastname=data.get('lastname'),
+            username=data['username'],
+        email=data['email']
+        )
+        db.session.add(new_user)
+        db.session.commit()
         return new_user, 201
 
-@ns.route('/<int:user_id>')
-@ns.param('user_id', 'The user identifier')
-@ns.response(404, 'User not found')
-class User(Resource):
-    @ns.doc('get_user')
-    @ns.marshal_with(user_model)
-    def get(self, user_id):
-        """Get a specific user"""
-        user = next((u for u in users if u['id'] == user_id), None)
-        if user:
-            return user
-        api.abort(404, f"User {user_id} not found")
 
-    @ns.doc('delete_user')
-    @ns.response(204, 'User deleted')
-    def delete(self, user_id):
+@user_ns.route('/<int:id>')
+@user_ns.response(404, 'User not found')
+class UserResource(Resource):
+    @user_ns.marshal_with(user_model)
+    def get(self, id):
+        """Get a user by ID"""
+        user = User.query.get_or_404(id)
+        return user
+
+    def delete(self, id):
         """Delete a user"""
-        global users
-        users = [u for u in users if u['id'] != user_id]
+        user = User.query.get_or_404(id)
+        db.session.delete(user)
+        db.session.commit()
         return '', 204
 
-    @ns.doc('update_user')
-    @ns.expect(user_model)
-    @ns.marshal_with(user_model)
-    def put(self, user_id):
-        """Update a user"""
-        user = next((u for u in users if u['id'] == user_id), None)
-        if not user:
-            api.abort(404, f"User {user_id} not found")
-        
-        user.update({
-            'name': api.payload['name'],
-            'email': api.payload['email']
-        })
-        return user
+
+# ================= TELEMETRY ROUTES =================
+@telemetry_ns.route('/')
+class TelemetryList(Resource):
+    @telemetry_ns.marshal_list_with(telemetry_model)
+    def get(self):
+        """Get all telemetry records"""
+        return Telemetry.query.all()
+
+    @telemetry_ns.expect(telemetry_model)
+    @telemetry_ns.marshal_with(telemetry_model, code=201)
+    def post(self):
+        """Add a new telemetry record"""
+        data = request.json
+        new_record = Telemetry(
+            date=datetime.strptime(data['date'], "%Y-%m-%d").date(),
+            time=datetime.strptime(data['time'], "%H:%M:%S").time(),
+            timezone=data['timezone'],
+            coordinates=data['coordinates'],
+            temperatures=data.get('temperatures'),
+            humidity=data.get('humidity'),
+            wind=data.get('wind'),
+            precipitation=data.get('precipitation'),
+            haze=data.get('haze'),
+            notes=data.get('notes')
+        )
+        db.session.add(new_record)
+        db.session.commit()
+        return new_record, 201
