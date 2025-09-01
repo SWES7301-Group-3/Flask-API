@@ -1,50 +1,38 @@
 from flask import request
 from flask_restx import Resource, fields, Namespace
+from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity, get_jwt
+)
 from app.extensions import db, api
 from app.models import User, Telemetry, UserRole
 from datetime import datetime
 from functools import wraps
 
-# Namespaces
 user_ns = api.namespace('users', description='User operations')
 telemetry_ns = api.namespace('telemetry', description='Telemetry operations')
 admin_ns = api.namespace('admin', description='Admin operations')
+auth_ns = api.namespace('auth', description='Authentication')
 
-# Role definitions
-class Role:
-    ADMIN = 'admin'
-    RESEARCHER = 'researcher'
-    USER = 'user'
+# --- Role-based decorators ---
+def role_required(*roles):
+    def decorator(f):
+        @wraps(f)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            identity = get_jwt_identity()
+            user = User.query.filter_by(id=identity).first()
+            if not user or user.role not in roles:
+                return {'message': 'Access forbidden: insufficient role'}, 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
 
-# Authentication decorators
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        user_role = request.headers.get('X-User-Role', 'user')
-        if user_role != Role.ADMIN:
-            return {'message': 'Admin access required'}, 403
-        return f(*args, **kwargs)
-    return decorated
+admin_required = role_required(UserRole.ADMIN)
+researcher_required = role_required(UserRole.ADMIN, UserRole.RESEARCHER)
+authenticated_required = jwt_required
 
-def researcher_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        user_role = request.headers.get('X-User-Role', 'user')
-        if user_role not in [Role.ADMIN, Role.RESEARCHER]:
-            return {'message': 'Researcher access required'}, 403
-        return f(*args, **kwargs)
-    return decorated
-
-def authenticated_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        user_role = request.headers.get('X-User-Role')
-        if not user_role:
-            return {'message': 'Authentication required'}, 401
-        return f(*args, **kwargs)
-    return decorated
-
-# User model schema for Swagger
+# --- Swagger models ---
 user_model = api.model('User', {
     'id': fields.Integer(readOnly=True, description='User ID'),
     'firstname': fields.String(required=True, description="User's first name"),
@@ -54,7 +42,23 @@ user_model = api.model('User', {
     'role': fields.String(description="User's role (admin/researcher/user)")
 })
 
-# Telemetry model schema for Swagger
+register_model = api.model('Register', {
+    'firstname': fields.String(required=True),
+    'lastname': fields.String(required=True),
+    'username': fields.String(required=True),
+    'email': fields.String(required=True),
+    'password': fields.String(required=True),
+})
+
+login_model = api.model('Login', {
+    'username': fields.String(required=True),
+    'password': fields.String(required=True),
+})
+
+refresh_model = api.model('Refresh', {
+    'refresh_token': fields.String(required=True),
+})
+
 telemetry_model = api.model('Telemetry', {
     'id': fields.Integer(readOnly=True, description='Telemetry ID'),
     'date': fields.String(required=True, description='Date in YYYY-MM-DD'),
@@ -70,15 +74,6 @@ telemetry_model = api.model('Telemetry', {
     'salinity': fields.Float(description='Salinity level'),
     'ph_level': fields.Float(description='pH level'),
     'pollutants': fields.Raw(description='Pollutant levels JSON object')
-})
-
-telemetry_public_model = api.model('TelemetryPublic', {
-    'id': fields.Integer(readOnly=True, description='Telemetry ID'),
-    'date': fields.String(description='Date in YYYY-MM-DD'),
-    'time': fields.String(description='Time in HH:MM:SS'),
-    'coordinates': fields.String(description='Lat, Long'),
-    'temperatures': fields.Raw(description='Temperature JSON object'),
-    'humidity': fields.Float(description='Humidity %')
 })
 
 telemetry_patch_model = api.model('TelemetryPatch', {
@@ -97,6 +92,40 @@ telemetry_patch_model = api.model('TelemetryPatch', {
     'pollutants': fields.Raw(description='Pollutant levels JSON object')
 })
 
+# ================= AUTH ROUTES =================
+@auth_ns.route('/login')
+class Login(Resource):
+    @auth_ns.expect(login_model)
+    def post(self):
+        data = request.json
+        user = User.query.filter_by(username=data['username']).first()
+        if not user or not user.check_password(data['password']):
+            return {'message': 'Invalid username or password'}, 401
+        access_token = create_access_token(identity=user.id, additional_claims={'role': user.role})
+        refresh_token = create_refresh_token(identity=user.id)
+        return {
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'role': user.role
+        }
+
+@auth_ns.route('/refresh')
+class Refresh(Resource):
+    @auth_ns.expect(refresh_model)
+    def post(self):
+        from flask_jwt_extended import decode_token
+        data = request.json
+        try:
+            decoded = decode_token(data['refresh_token'])
+            user_id = decoded['sub']
+            user = User.query.get(user_id)
+            if not user:
+                return {'message': 'User not found'}, 404
+            access_token = create_access_token(identity=user.id, additional_claims={'role': user.role})
+            return {'access_token': access_token}
+        except Exception:
+            return {'message': 'Invalid refresh token'}, 401
+
 # ================= USER ROUTES =================
 @user_ns.route('/')
 class UserList(Resource):
@@ -106,18 +135,23 @@ class UserList(Resource):
         """Get all users (Admin only)"""
         return User.query.all()
 
-    @user_ns.expect(user_model)
+    @user_ns.expect(register_model)
     @user_ns.marshal_with(user_model, code=201)
     def post(self):
         """Register a new user (Public)"""
         data = request.json
+        if User.query.filter_by(username=data['username']).first():
+            return {'message': 'Username already exists'}, 400
+        if User.query.filter_by(email=data['email']).first():
+            return {'message': 'Email already exists'}, 400
         new_user = User(
             firstname=data.get('firstname'),
             lastname=data.get('lastname'),
             username=data['username'],
             email=data['email'],
-            role=Role.USER  # Default role
+            role=UserRole.USER
         )
+        new_user.set_password(data['password'])
         db.session.add(new_user)
         db.session.commit()
         return new_user, 201
@@ -125,20 +159,18 @@ class UserList(Resource):
 @user_ns.route('/<int:id>')
 @user_ns.response(404, 'User not found')
 class UserResource(Resource):
-    @authenticated_required
+    @authenticated_required()
     @user_ns.marshal_with(user_model)
     def get(self, id):
-        """Get a user by ID (Authenticated users can see their own profile)"""
         user = User.query.get_or_404(id)
-        current_user_role = request.headers.get('X-User-Role')
-        current_user_id = request.headers.get('X-User-ID')
-        if current_user_role != Role.ADMIN and str(user.id) != current_user_id:
+        current_user_id = get_jwt_identity()
+        user_role = get_jwt()['role']
+        if user_role != UserRole.ADMIN and user.id != current_user_id:
             return {'message': 'Access denied'}, 403
         return user
 
     @admin_required
     def delete(self, id):
-        """Delete a user (Admin only)"""
         user = User.query.get_or_404(id)
         db.session.delete(user)
         db.session.commit()
@@ -153,11 +185,10 @@ class AdminUserRole(Resource):
         'role': fields.String(required=True, description='New role (admin/researcher/user)')
     }))
     def put(self, user_id):
-        """Update user role (Admin only)"""
         user = User.query.get_or_404(user_id)
         data = request.json
         new_role = data.get('role')
-        if new_role not in [Role.ADMIN, Role.RESEARCHER, Role.USER]:
+        if new_role not in [UserRole.ADMIN, UserRole.RESEARCHER, UserRole.USER]:
             return {'message': 'Invalid role'}, 400
         user.role = new_role
         db.session.commit()
@@ -167,7 +198,6 @@ class AdminUserRole(Resource):
 class AdminAdvancedStats(Resource):
     @admin_required
     def get(self):
-        """Get advanced statistics (Admin only)"""
         from sqlalchemy import func
         stats = db.session.query(
             func.count(Telemetry.id).label('total_records'),
@@ -187,69 +217,36 @@ class AdminAdvancedStats(Resource):
 # ================= TELEMETRY ROUTES =================
 @telemetry_ns.route('/')
 class TelemetryList(Resource):
-    @authenticated_required
+    @authenticated_required()
     def get(self):
-        """Get telemetry records with role-based access"""
-        user_role = request.headers.get('X-User-Role', 'user')
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        user_role = user.role if user else UserRole.USER
         query = Telemetry.query
-
-        if user_role == Role.USER:
+        if user_role == UserRole.USER:
             records = query.with_entities(
-                Telemetry.id,
-                Telemetry.date,
-                Telemetry.time,
-                Telemetry.coordinates,
-                Telemetry.temperatures,
-                Telemetry.humidity
+                Telemetry.id, Telemetry.date, Telemetry.time,
+                Telemetry.coordinates, Telemetry.temperatures, Telemetry.humidity
             ).all()
-            return [{
-                'id': r.id,
-                'date': r.date.isoformat(),
-                'time': r.time.isoformat(),
-                'coordinates': r.coordinates,
-                'temperatures': r.temperatures,
-                'humidity': r.humidity
-            } for r in records]
-        elif user_role == Role.RESEARCHER:
+            return [{ 'id': r.id, 'date': r.date.isoformat(), 'time': r.time.isoformat(),
+                'coordinates': r.coordinates, 'temperatures': r.temperatures, 'humidity': r.humidity } for r in records]
+        elif user_role == UserRole.RESEARCHER:
             records = query.all()
-            return [{
-                'id': r.id,
-                'date': r.date.isoformat(),
-                'time': r.time.isoformat(),
-                'timezone': r.timezone,
-                'coordinates': r.coordinates,
-                'temperatures': r.temperatures,
-                'humidity': r.humidity,
-                'wind': r.wind,
-                'precipitation': r.precipitation,
-                'haze': r.haze,
-                'salinity': r.salinity,
-                'ph_level': r.ph_level,
-                'pollutants': r.pollutants
-            } for r in records]
+            return [{ 'id': r.id, 'date': r.date.isoformat(), 'time': r.time.isoformat(),
+                'timezone': r.timezone, 'coordinates': r.coordinates, 'temperatures': r.temperatures,
+                'humidity': r.humidity, 'wind': r.wind, 'precipitation': r.precipitation,
+                'haze': r.haze, 'salinity': r.salinity, 'ph_level': r.ph_level, 'pollutants': r.pollutants } for r in records]
         else:  # Admin
-            return [{
-                'id': r.id,
-                'date': r.date.isoformat(),
-                'time': r.time.isoformat(),
-                'timezone': r.timezone,
-                'coordinates': r.coordinates,
-                'temperatures': r.temperatures,
-                'humidity': r.humidity,
-                'wind': r.wind,
-                'precipitation': r.precipitation,
-                'haze': r.haze,
-                'notes': r.notes,
-                'salinity': r.salinity,
-                'ph_level': r.ph_level,
-                'pollutants': r.pollutants
-            } for r in query.all()]
+            return [{ 'id': r.id, 'date': r.date.isoformat(), 'time': r.time.isoformat(),
+                'timezone': r.timezone, 'coordinates': r.coordinates, 'temperatures': r.temperatures,
+                'humidity': r.humidity, 'wind': r.wind, 'precipitation': r.precipitation,
+                'haze': r.haze, 'notes': r.notes, 'salinity': r.salinity,
+                'ph_level': r.ph_level, 'pollutants': r.pollutants } for r in query.all()]
 
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     @telemetry_ns.marshal_with(telemetry_model, code=201)
     def post(self):
-        """Add a new telemetry record (Researchers and Admin only)"""
         data = request.json
         new_record = Telemetry(
             date=datetime.strptime(data['date'], "%Y-%m-%d").date(),
@@ -274,12 +271,13 @@ class TelemetryList(Resource):
 @telemetry_ns.response(404, 'Telemetry record not found')
 @telemetry_ns.param('id', 'The telemetry record identifier')
 class TelemetryResource(Resource):
-    @authenticated_required
+    @authenticated_required()
     def get(self, id):
-        """Get a specific telemetry record by ID with role-based access"""
         record = Telemetry.query.get_or_404(id)
-        user_role = request.headers.get('X-User-Role', 'user')
-        if user_role == Role.USER:
+        user_id = get_jwt_identity()
+        user = User.query.get(user_id)
+        user_role = user.role if user else UserRole.USER
+        if user_role == UserRole.USER:
             return {
                 'id': record.id,
                 'date': record.date.isoformat(),
@@ -288,7 +286,7 @@ class TelemetryResource(Resource):
                 'temperatures': record.temperatures,
                 'humidity': record.humidity
             }
-        elif user_role == Role.RESEARCHER:
+        elif user_role == UserRole.RESEARCHER:
             return {
                 'id': record.id,
                 'date': record.date.isoformat(),
@@ -325,7 +323,6 @@ class TelemetryResource(Resource):
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     def put(self, id):
-        """Update an entire telemetry record (Researchers and Admin only)"""
         record = Telemetry.query.get_or_404(id)
         data = request.json
         record.date = datetime.strptime(data['date'], "%Y-%m-%d").date()
@@ -347,7 +344,6 @@ class TelemetryResource(Resource):
     @researcher_required
     @telemetry_ns.expect(telemetry_patch_model)
     def patch(self, id):
-        """Partially update a telemetry record (Researchers and Admin only)"""
         record = Telemetry.query.get_or_404(id)
         data = request.json
         if 'date' in data:
@@ -381,7 +377,6 @@ class TelemetryResource(Resource):
 
     @admin_required
     def delete(self, id):
-        """Delete a telemetry record (Admin only)"""
         record = Telemetry.query.get_or_404(id)
         db.session.delete(record)
         db.session.commit()
@@ -392,7 +387,6 @@ class TelemetryResource(Resource):
 class SalinityResearch(Resource):
     @researcher_required
     def get(self):
-        """Get salinity data for research (Researchers and Admin only)"""
         records = Telemetry.query.with_entities(
             Telemetry.date,
             Telemetry.time,
@@ -410,7 +404,6 @@ class SalinityResearch(Resource):
 class PollutantsResearch(Resource):
     @researcher_required
     def get(self):
-        """Get pollutant data for research (Researchers and Admin only)"""
         records = Telemetry.query.with_entities(
             Telemetry.date,
             Telemetry.time,
@@ -428,7 +421,6 @@ class PollutantsResearch(Resource):
 @telemetry_ns.route('/public/summary')
 class PublicTelemetrySummary(Resource):
     def get(self):
-        """Get public summary data (No authentication required)"""
         from sqlalchemy import func
         stats = db.session.query(
             func.count(Telemetry.id).label('total_records'),
