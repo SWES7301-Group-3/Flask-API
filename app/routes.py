@@ -1,7 +1,7 @@
 from flask import request
 from flask_restx import Resource, fields, Namespace
 from flask_jwt_extended import (
-    JWTManager, create_access_token, create_refresh_token,
+    create_access_token, create_refresh_token,
     jwt_required, get_jwt_identity, get_jwt
 )
 from app.extensions import db, api
@@ -14,7 +14,6 @@ telemetry_ns = api.namespace('telemetry', description='Telemetry operations')
 admin_ns = api.namespace('admin', description='Admin operations')
 auth_ns = api.namespace('auth', description='Authentication')
 
-# --- Role-based decorators ---
 def role_required(*roles):
     def decorator(f):
         @wraps(f)
@@ -32,7 +31,6 @@ admin_required = role_required(UserRole.ADMIN)
 researcher_required = role_required(UserRole.ADMIN, UserRole.RESEARCHER)
 authenticated_required = jwt_required
 
-# --- Swagger models ---
 user_model = api.model('User', {
     'id': fields.Integer(readOnly=True, description='User ID'),
     'firstname': fields.String(required=True, description="User's first name"),
@@ -48,6 +46,7 @@ register_model = api.model('Register', {
     'username': fields.String(required=True),
     'email': fields.String(required=True),
     'password': fields.String(required=True),
+    'role': fields.String(description="User's role (admin/researcher/user)", default=UserRole.USER)
 })
 
 login_model = api.model('Login', {
@@ -129,6 +128,7 @@ class Refresh(Resource):
 # ================= USER ROUTES =================
 @user_ns.route('/')
 class UserList(Resource):
+    @user_ns.doc(security='Bearer')  # Annotate: JWT required
     @admin_required
     @user_ns.marshal_list_with(user_model)
     def get(self):
@@ -144,12 +144,16 @@ class UserList(Resource):
             return {'message': 'Username already exists'}, 400
         if User.query.filter_by(email=data['email']).first():
             return {'message': 'Email already exists'}, 400
+        # Take role from request if provided, else default to USER
+        role = data.get('role') or UserRole.USER
+        if role not in [UserRole.ADMIN, UserRole.RESEARCHER, UserRole.USER]:
+            role = UserRole.USER
         new_user = User(
             firstname=data.get('firstname'),
             lastname=data.get('lastname'),
             username=data['username'],
             email=data['email'],
-            role=UserRole.USER
+            role=role
         )
         new_user.set_password(data['password'])
         db.session.add(new_user)
@@ -159,6 +163,7 @@ class UserList(Resource):
 @user_ns.route('/<int:id>')
 @user_ns.response(404, 'User not found')
 class UserResource(Resource):
+    @user_ns.doc(security='Bearer')  # Annotate: JWT required
     @authenticated_required()
     @user_ns.marshal_with(user_model)
     def get(self, id):
@@ -169,6 +174,7 @@ class UserResource(Resource):
             return {'message': 'Access denied'}, 403
         return user
 
+    @user_ns.doc(security='Bearer')  # Annotate: JWT required
     @admin_required
     def delete(self, id):
         user = User.query.get_or_404(id)
@@ -180,6 +186,7 @@ class UserResource(Resource):
 @admin_ns.route('/users/<int:user_id>/role')
 @admin_ns.param('user_id', 'The user identifier')
 class AdminUserRole(Resource):
+    @admin_ns.doc(security='Bearer')  # Annotate: JWT required
     @admin_required
     @admin_ns.expect(api.model('RoleUpdate', {
         'role': fields.String(required=True, description='New role (admin/researcher/user)')
@@ -196,6 +203,7 @@ class AdminUserRole(Resource):
 
 @admin_ns.route('/telemetry/stats/advanced')
 class AdminAdvancedStats(Resource):
+    @admin_ns.doc(security='Bearer')  # Annotate: JWT required
     @admin_required
     def get(self):
         from sqlalchemy import func
@@ -217,6 +225,7 @@ class AdminAdvancedStats(Resource):
 # ================= TELEMETRY ROUTES =================
 @telemetry_ns.route('/')
 class TelemetryList(Resource):
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @authenticated_required()
     def get(self):
         user_id = get_jwt_identity()
@@ -243,6 +252,7 @@ class TelemetryList(Resource):
                 'haze': r.haze, 'notes': r.notes, 'salinity': r.salinity,
                 'ph_level': r.ph_level, 'pollutants': r.pollutants } for r in query.all()]
 
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     @telemetry_ns.marshal_with(telemetry_model, code=201)
@@ -271,6 +281,7 @@ class TelemetryList(Resource):
 @telemetry_ns.response(404, 'Telemetry record not found')
 @telemetry_ns.param('id', 'The telemetry record identifier')
 class TelemetryResource(Resource):
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @authenticated_required()
     def get(self, id):
         record = Telemetry.query.get_or_404(id)
@@ -320,6 +331,7 @@ class TelemetryResource(Resource):
                 'pollutants': record.pollutants
             }
 
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     def put(self, id):
@@ -341,6 +353,7 @@ class TelemetryResource(Resource):
         db.session.commit()
         return {'message': 'Record updated successfully'}
 
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @researcher_required
     @telemetry_ns.expect(telemetry_patch_model)
     def patch(self, id):
@@ -375,6 +388,7 @@ class TelemetryResource(Resource):
         db.session.commit()
         return {'message': 'Record updated successfully'}
 
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @admin_required
     def delete(self, id):
         record = Telemetry.query.get_or_404(id)
@@ -382,9 +396,9 @@ class TelemetryResource(Resource):
         db.session.commit()
         return '', 204
 
-# ================= RESEARCHER-SPECIFIC ROUTES =================
 @telemetry_ns.route('/research/salinity')
 class SalinityResearch(Resource):
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @researcher_required
     def get(self):
         records = Telemetry.query.with_entities(
@@ -402,6 +416,7 @@ class SalinityResearch(Resource):
 
 @telemetry_ns.route('/research/pollutants')
 class PollutantsResearch(Resource):
+    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
     @researcher_required
     def get(self):
         records = Telemetry.query.with_entities(
@@ -417,7 +432,6 @@ class PollutantsResearch(Resource):
             'pollutants': r.pollutants
         } for r in records]
 
-# ================= PUBLIC ROUTES =================
 @telemetry_ns.route('/public/summary')
 class PublicTelemetrySummary(Resource):
     def get(self):
