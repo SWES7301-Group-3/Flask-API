@@ -1,5 +1,5 @@
 from flask import Flask
-from app.extensions import db, api
+from app.extensions import db, api, jwt
 from flask_migrate import Migrate
 from flask_cors import CORS
 from config import Config
@@ -13,6 +13,7 @@ def create_app():
     CORS(app)
     db.init_app(app)
     api.init_app(app)
+    jwt.init_app(app)       # 🔑 enable JWT
     migrate.init_app(app, db)  # 🔑 enable migrations
 
     # import routes
