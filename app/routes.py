@@ -100,8 +100,9 @@ class Login(Resource):
         user = User.query.filter_by(username=data['username']).first()
         if not user or not user.check_password(data['password']):
             return {'message': 'Invalid username or password'}, 401
-        access_token = create_access_token(identity=user.id, additional_claims={'role': user.role})
-        refresh_token = create_refresh_token(identity=user.id)
+        # Ensure identity is a string for JWT!
+        access_token = create_access_token(identity=str(user.id), additional_claims={'role': user.role})
+        refresh_token = create_refresh_token(identity=str(user.id))
         return {
             'access_token': access_token,
             'refresh_token': refresh_token,
@@ -117,10 +118,10 @@ class Refresh(Resource):
         try:
             decoded = decode_token(data['refresh_token'])
             user_id = decoded['sub']
-            user = User.query.get(user_id)
+            user = User.query.get(int(user_id))  # Ensure correct type
             if not user:
                 return {'message': 'User not found'}, 404
-            access_token = create_access_token(identity=user.id, additional_claims={'role': user.role})
+            access_token = create_access_token(identity=str(user.id), additional_claims={'role': user.role})
             return {'access_token': access_token}
         except Exception:
             return {'message': 'Invalid refresh token'}, 401
@@ -128,7 +129,7 @@ class Refresh(Resource):
 # ================= USER ROUTES =================
 @user_ns.route('/')
 class UserList(Resource):
-    @user_ns.doc(security='Bearer')  # Annotate: JWT required
+    @user_ns.doc(security='Bearer')
     @admin_required
     @user_ns.marshal_list_with(user_model)
     def get(self):
@@ -144,7 +145,6 @@ class UserList(Resource):
             return {'message': 'Username already exists'}, 400
         if User.query.filter_by(email=data['email']).first():
             return {'message': 'Email already exists'}, 400
-        # Take role from request if provided, else default to USER
         role = data.get('role') or UserRole.USER
         if role not in [UserRole.ADMIN, UserRole.RESEARCHER, UserRole.USER]:
             role = UserRole.USER
@@ -163,18 +163,18 @@ class UserList(Resource):
 @user_ns.route('/<int:id>')
 @user_ns.response(404, 'User not found')
 class UserResource(Resource):
-    @user_ns.doc(security='Bearer')  # Annotate: JWT required
+    @user_ns.doc(security='Bearer')
     @authenticated_required()
     @user_ns.marshal_with(user_model)
     def get(self, id):
         user = User.query.get_or_404(id)
         current_user_id = get_jwt_identity()
         user_role = get_jwt()['role']
-        if user_role != UserRole.ADMIN and user.id != current_user_id:
+        if user_role != UserRole.ADMIN and int(user.id) != int(current_user_id):
             return {'message': 'Access denied'}, 403
         return user
 
-    @user_ns.doc(security='Bearer')  # Annotate: JWT required
+    @user_ns.doc(security='Bearer')
     @admin_required
     def delete(self, id):
         user = User.query.get_or_404(id)
@@ -186,7 +186,7 @@ class UserResource(Resource):
 @admin_ns.route('/users/<int:user_id>/role')
 @admin_ns.param('user_id', 'The user identifier')
 class AdminUserRole(Resource):
-    @admin_ns.doc(security='Bearer')  # Annotate: JWT required
+    @admin_ns.doc(security='Bearer')
     @admin_required
     @admin_ns.expect(api.model('RoleUpdate', {
         'role': fields.String(required=True, description='New role (admin/researcher/user)')
@@ -203,7 +203,7 @@ class AdminUserRole(Resource):
 
 @admin_ns.route('/telemetry/stats/advanced')
 class AdminAdvancedStats(Resource):
-    @admin_ns.doc(security='Bearer')  # Annotate: JWT required
+    @admin_ns.doc(security='Bearer')
     @admin_required
     def get(self):
         from sqlalchemy import func
@@ -225,11 +225,11 @@ class AdminAdvancedStats(Resource):
 # ================= TELEMETRY ROUTES =================
 @telemetry_ns.route('/')
 class TelemetryList(Resource):
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @authenticated_required()
     def get(self):
         user_id = get_jwt_identity()
-        user = User.query.get(user_id)
+        user = User.query.get(int(user_id))
         user_role = user.role if user else UserRole.USER
         query = Telemetry.query
         if user_role == UserRole.USER:
@@ -245,14 +245,14 @@ class TelemetryList(Resource):
                 'timezone': r.timezone, 'coordinates': r.coordinates, 'temperatures': r.temperatures,
                 'humidity': r.humidity, 'wind': r.wind, 'precipitation': r.precipitation,
                 'haze': r.haze, 'salinity': r.salinity, 'ph_level': r.ph_level, 'pollutants': r.pollutants } for r in records]
-        else:  # Admin
+        else:
             return [{ 'id': r.id, 'date': r.date.isoformat(), 'time': r.time.isoformat(),
                 'timezone': r.timezone, 'coordinates': r.coordinates, 'temperatures': r.temperatures,
                 'humidity': r.humidity, 'wind': r.wind, 'precipitation': r.precipitation,
                 'haze': r.haze, 'notes': r.notes, 'salinity': r.salinity,
                 'ph_level': r.ph_level, 'pollutants': r.pollutants } for r in query.all()]
 
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     @telemetry_ns.marshal_with(telemetry_model, code=201)
@@ -281,12 +281,12 @@ class TelemetryList(Resource):
 @telemetry_ns.response(404, 'Telemetry record not found')
 @telemetry_ns.param('id', 'The telemetry record identifier')
 class TelemetryResource(Resource):
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @authenticated_required()
     def get(self, id):
         record = Telemetry.query.get_or_404(id)
         user_id = get_jwt_identity()
-        user = User.query.get(user_id)
+        user = User.query.get(int(user_id))
         user_role = user.role if user else UserRole.USER
         if user_role == UserRole.USER:
             return {
@@ -313,7 +313,7 @@ class TelemetryResource(Resource):
                 'ph_level': record.ph_level,
                 'pollutants': record.pollutants
             }
-        else:  # Admin
+        else:
             return {
                 'id': record.id,
                 'date': record.date.isoformat(),
@@ -331,7 +331,7 @@ class TelemetryResource(Resource):
                 'pollutants': record.pollutants
             }
 
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @researcher_required
     @telemetry_ns.expect(telemetry_model)
     def put(self, id):
@@ -353,7 +353,7 @@ class TelemetryResource(Resource):
         db.session.commit()
         return {'message': 'Record updated successfully'}
 
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @researcher_required
     @telemetry_ns.expect(telemetry_patch_model)
     def patch(self, id):
@@ -388,7 +388,7 @@ class TelemetryResource(Resource):
         db.session.commit()
         return {'message': 'Record updated successfully'}
 
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @admin_required
     def delete(self, id):
         record = Telemetry.query.get_or_404(id)
@@ -398,7 +398,7 @@ class TelemetryResource(Resource):
 
 @telemetry_ns.route('/research/salinity')
 class SalinityResearch(Resource):
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @researcher_required
     def get(self):
         records = Telemetry.query.with_entities(
@@ -416,7 +416,7 @@ class SalinityResearch(Resource):
 
 @telemetry_ns.route('/research/pollutants')
 class PollutantsResearch(Resource):
-    @telemetry_ns.doc(security='Bearer')  # Annotate: JWT required
+    @telemetry_ns.doc(security='Bearer')
     @researcher_required
     def get(self):
         records = Telemetry.query.with_entities(
