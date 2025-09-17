@@ -6,8 +6,9 @@ from config import Config
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
 from app.models import User, Telemetry
+import logging
 
-migrate = Migrate()  # create instance
+migrate = Migrate()
 
 def create_app(test_config: dict | None = None):
     app = Flask(__name__)
@@ -25,9 +26,12 @@ def create_app(test_config: dict | None = None):
     app.config.setdefault("JWT_COOKIE_CSRF_PROTECT", False)
     app.config.setdefault("PROPAGATE_EXCEPTIONS", True)
 
+    # Setup logging
+    logging.basicConfig(level=logging.INFO)
+    
     # Initialize extensions
     db.init_app(app)
-    CORS(app)
+    CORS(app, origins=['http://localhost:8000'])  # Allow Django frontend
     api.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
@@ -46,14 +50,16 @@ def create_app(test_config: dict | None = None):
 
     # Setup Flask-Admin (admin dashboard at /admin)
     admin = Admin(app, name='MyApp Admin', template_mode='bootstrap4')
+
     admin.add_view(ModelView(User, db.session))
     admin.add_view(ModelView(Telemetry, db.session))
 
-    # Import namespaces from routes and register them
-    from app.routes import user_ns, telemetry_ns, admin_ns, auth_ns
-    api.add_namespace(user_ns)
-    api.add_namespace(telemetry_ns)
-    api.add_namespace(admin_ns)
-    api.add_namespace(auth_ns)
+    # Import and register namespaces
+    from app.routes import public_ns, basic_ns, research_ns, premium_ns, subscription_ns
+    api.add_namespace(public_ns)
+    api.add_namespace(basic_ns)
+    api.add_namespace(research_ns)
+    api.add_namespace(premium_ns)
+    api.add_namespace(subscription_ns)
 
     return app
